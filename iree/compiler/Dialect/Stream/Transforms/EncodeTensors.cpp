@@ -52,7 +52,7 @@ static LogicalResult checkEncoding(Operation *op, RankedTensorType encodingType,
 // Returns an 8-bit aligned element byte count.
 static int64_t getElementByteSize(Type elementType) {
   int64_t bitCount = elementType.getIntOrFloatBitWidth();
-  int64_t byteCount = (bitCount + 8 - 1) / 8;
+  int64_t byteCount = std::max<unsigned>(8, llvm::PowerOf2Ceil(bitCount)) / 8;
   return byteCount;
 }
 
