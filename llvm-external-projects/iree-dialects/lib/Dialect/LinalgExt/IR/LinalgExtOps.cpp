@@ -100,6 +100,79 @@ OpFoldResult IREE::LinalgExt::getDim(OpBuilder &builder, Location loc, Value v,
   return builder.getI64IntegerAttr(t.getDimSize(dim));
 }
 
+// Creates a constant of type `elemType` with value `val`.
+static Value getConstant(OpBuilder &b, Location loc, int64_t val,
+                         Type elemType) {
+  Attribute attr = {};
+  if (elemType.isa<mlir::FloatType>()) attr = b.getFloatAttr(elemType, val);
+  if (elemType.isa<mlir::IndexType>()) attr = b.getIndexAttr(val);
+  if (elemType.isa<mlir::IntegerType>())
+    attr = b.getIntegerAttr(
+        elemType, APInt(elemType.cast<IntegerType>().getWidth(), val));
+  if (!attr) return nullptr;
+  return b.create<arith::ConstantOp>(loc, elemType, attr);
+}
+
+static Value castIntToIndex(OpBuilder &b, Location loc, Value v) {
+  assert(v.getType().isa<IntegerType>() && "must be called with integer type");
+  return b.create<arith::IndexCastOp>(loc, b.getIndexType(), v);
+}
+
+// Convert a scalar value to the target type. The scalar value can be an element
+// from a tensor or a scalar in the pytorch dialect. Both the scalar and dtype
+// should be converted builtin types.
+static Value convertScalarToDtype(OpBuilder &b, Location loc, Value scalar,
+                                  Type dtype) {
+  Type scalarType = scalar.getType();
+  if (scalarType == dtype) return scalar;
+
+  // TODO: For the byte(ui8) or char(i8) case, we need the unconverted dtype to
+  // be able to know if we need signed or unsigned conversion.
+  auto isByteOrChar = [](Type type) {
+    if (auto integerTy = type.dyn_cast<mlir::IntegerType>()) {
+      return integerTy.getWidth() == 8;
+    }
+    return false;
+  };
+
+  if (isByteOrChar(scalarType) || isByteOrChar(dtype) ||
+      scalarType.isSignlessInteger(1) || dtype.isSignlessInteger(1)) {
+    // TODO: Handle bool type.
+    mlir::emitError(loc)
+        << "unsupported byte, char or bool type for convertScalarToDtype "
+        << scalarType << "(scalar type) -> " << dtype << "(dtype)";
+    return nullptr;
+  }
+
+  if (auto dtypeFloat = dtype.dyn_cast<mlir::FloatType>()) {
+    if (auto scalarFloat = scalarType.dyn_cast<mlir::FloatType>()) {
+      if (scalarFloat.getWidth() > dtypeFloat.getWidth())
+        return b.create<arith::TruncFOp>(loc, scalar, dtype);
+      // Only scalarFloat width < dtypeFloat width can reach here.
+      return b.create<arith::ExtFOp>(loc, scalar, dtype);
+    }
+    assert(scalarType.isa<mlir::IntegerType>());
+    // It's safe to use SIToFPOp because ui8/si8 are the only ones where
+    // unsigned handling is needed, and we checked for that case above.
+    return b.create<arith::SIToFPOp>(loc, scalar, dtype);
+  }
+
+  if (auto dtypeInteger = dtype.dyn_cast<mlir::IntegerType>()) {
+    if (auto scalarFloat = scalarType.dyn_cast<mlir::FloatType>())
+      return b.create<arith::FPToSIOp>(loc, scalar, dtype);
+    assert(scalarType.isa<mlir::IntegerType>());
+    auto scalarInteger = scalarType.cast<mlir::IntegerType>();
+    if (scalarInteger.getWidth() > dtypeInteger.getWidth())
+      return b.create<arith::TruncIOp>(loc, scalar, dtype);
+    // Only scalarInteger width < dtypeInteger width can reach here.
+    // It's safe to use ExtSIOp here because ui8/si8 are the only ones where
+    // unsigned handling is needed, and we checked for that case above.
+    return b.create<arith::ExtSIOp>(loc, scalar, dtype);
+  }
+
+  llvm_unreachable("convertScalarToDtype should handle all the types");
+}
+
 //===----------------------------------------------------------------------===//
 // ScatterOp
 //===----------------------------------------------------------------------===//
@@ -1131,6 +1204,191 @@ Operation *ReverseOp::getTiledImplementation(OpBuilder &builder,
   return tiledRevOp;
 }
 
+//===----------------------------------------------------------------------===//
+// EmbeddingDenseBackwardOp
+//===----------------------------------------------------------------------===//
+
+static LogicalResult verifyEmbeddingDenseBackwardOp(
+    EmbeddingDenseBackwardOp op) {
+  if (op.getNumInputs() != 2) {
+    return op.emitOpError("expected two input operands");
+  }
+  if (op.getNumOutputs() != 1) {
+    return op.emitOpError("expected one output operand");
+  }
+  auto gradType = op.grad_().getType().cast<ShapedType>();
+  auto indicesType = op.indices_().getType().cast<ShapedType>();
+  auto outputType = op.output().getType().cast<ShapedType>();
+  if (gradType.getElementType() != outputType.getElementType()) {
+    return op.emitOpError(
+        "expected input/output element types to be identical");
+  }
+  if (!indicesType.getElementType().isa<mlir::IntegerType>()) {
+    return op.emitOpError("expected indices element type to be integer");
+  }
+  return success();
+}
+
+SmallVector<Range> EmbeddingDenseBackwardOp::getIterationDomain(
+    OpBuilder &builder) {
+  SmallVector<Range> loopBounds(0);
+  return loopBounds;
+}
+
+SmallVector<StringRef> EmbeddingDenseBackwardOp::getLoopIteratorTypes() {
+  SmallVector<StringRef> iteratorTypes(0);
+  return iteratorTypes;
+}
+
+// `grad` is an input tensor of any element type, `indices` is a tensor of
+// integer type. `numWeights` and `paddingIdx` are integer constants and
+// `scaleGradByFreq` is a boolean constant. Let's say the result of the
+// EmbeddingDenseBackwardOp is `gradWeight`, a 2-d tensor initialized with
+// zeros. The approach used for generating the output is as follows:
+//
+//        for i = 0; i < numel; i++
+//            countIndices[indices[i]]++
+//
+//        for i = 0; i< numel; i++{
+//            if (paddingIdx != indices[i]) {
+//                scale = 1.0
+//                if (scaleGradByFreq)
+//                    scale /= countIndices[indices[i]]
+//                for j = 0; j < gradWeight.size[1]; j++
+//                    gradWeight[indices[i], j] += grad[i, j] * scale
+//            }
+//        }
+// Here `numel` is the number of elements of `indices` tensor.
+LogicalResult EmbeddingDenseBackwardOp::generateScalarImplementation(
+    OpBuilder &b, Location loc, ValueRange ivs) {
+  Value grad = grad_();
+  Value indices = indices_();
+  Value gradWeight = output();
+  uint64_t numWeights = num_weights();
+  uint64_t paddingIdx = padding_idx();
+  bool scaleGradByFreq = scale_grad_by_freq();
+
+  Value cstZeroIndex = getConstant(b, loc, 0, b.getIndexType());
+  Value cstZeroInt = getConstant(b, loc, 0, b.getIntegerType(32));
+  Value cstOneIndex = getConstant(b, loc, 1, b.getIndexType());
+  Value cstOneInt = getConstant(b, loc, 1, b.getIntegerType(32));
+  Value cstNumWeights = getConstant(b, loc, numWeights, b.getIndexType());
+  Value cstPaddingIdx = getConstant(b, loc, paddingIdx, b.getIndexType());
+
+  MemRefType gradType = grad.getType().cast<mlir::MemRefType>();
+  Type elementType = gradType.getElementType();
+  unsigned gradRank = gradType.getRank();
+  Value gradLastDim = getDimValue(b, loc, grad, gradRank - 1);
+  MemRefType indicesType = indices.getType().cast<mlir::MemRefType>();
+  unsigned indicesRank = indicesType.getRank();
+  Value cstZero = getConstant(b, loc, 0, elementType);
+
+  // Initializing the `gradWeight` with zero.
+  b.create<scf::ForOp>(
+      loc, cstZeroIndex, cstNumWeights, cstOneIndex, ValueRange{},
+      [&](OpBuilder &b, Location loc, Value ivOuter, ValueRange iters) {
+        b.create<scf::ForOp>(
+            loc, cstZeroIndex, gradLastDim, cstOneIndex, ValueRange{},
+            [&](OpBuilder &b, Location loc, Value ivInner, ValueRange iters) {
+              SmallVector<Value> indices{ivOuter, ivInner};
+              b.create<memref::StoreOp>(loc, cstZero, gradWeight, indices);
+              b.create<scf::YieldOp>(loc);
+            });
+        b.create<scf::YieldOp>(loc);
+      });
+
+  //  Convert `indices` to a 1-d memref.
+  if (indicesRank > 1) {
+    SmallVector<ReassociationIndices> reassociation(1);
+    for (auto i : llvm::seq<int64_t>(0, indicesRank))
+      reassociation[0].push_back(i);
+    indices = b.create<memref::CollapseShapeOp>(loc, indices, reassociation);
+  }
+
+  //  Convert `grad` to a 2-d memref.
+  if (gradRank > 2) {
+    SmallVector<ReassociationIndices> reassociation(2);
+    for (auto i : llvm::seq<int64_t>(0, gradRank - 1))
+      reassociation[0].push_back(i);
+    reassociation[1].push_back(gradRank - 1);
+    grad = b.create<memref::CollapseShapeOp>(loc, grad, reassociation);
+  }
+
+  MemRefType countIndicesAllocType =
+      MemRefType::get({-1}, b.getIntegerType(32), {}, 0);
+  Value countIndices =
+      b.create<memref::AllocOp>(loc, countIndicesAllocType, cstNumWeights);
+
+  // Initializing the `countIndices` with zero.
+  b.create<scf::ForOp>(
+      loc, cstZeroIndex, cstNumWeights, cstOneIndex, ValueRange{},
+      [&](OpBuilder &b, Location loc, Value iv, ValueRange iters) {
+        b.create<memref::StoreOp>(loc, cstZeroInt, countIndices, iv);
+        b.create<scf::YieldOp>(loc);
+      });
+
+  Value numelIndices = getDimValue(b, loc, indices, 0);
+
+  // Count the frequency of `indices` and store that in `countIndices`.
+  b.create<scf::ForOp>(
+      loc, cstZeroIndex, numelIndices, cstOneIndex, ValueRange{},
+      [&](OpBuilder &b, Location loc, Value iv, ValueRange iters) {
+        Value index = b.create<memref::LoadOp>(loc, indices, iv);
+        index = castIntToIndex(b, loc, index);
+        Value count = b.create<memref::LoadOp>(loc, countIndices, index);
+        count = b.create<arith::AddIOp>(loc, count, cstOneInt);
+        b.create<memref::StoreOp>(loc, count, countIndices, index);
+        b.create<scf::YieldOp>(loc);
+      });
+
+  // Computing the final result i.e. `gradWeight`
+  b.create<scf::ForOp>(
+      loc, cstZeroIndex, numelIndices, cstOneIndex, ValueRange{},
+      [&](OpBuilder &b, Location loc, Value ivOuter, ValueRange iters) {
+        Value index = b.create<memref::LoadOp>(loc, indices, ivOuter);
+        index = castIntToIndex(b, loc, index);
+        Value cond = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
+                                             cstPaddingIdx, index);
+        b.create<scf::IfOp>(
+            loc, TypeRange{}, cond, [&](OpBuilder &b, Location loc) {
+              Value count = b.create<memref::LoadOp>(loc, countIndices, index);
+              Value scale = getConstant(b, loc, 1, elementType);
+              if (scaleGradByFreq) {
+                if (elementType.isa<mlir::FloatType>()) {
+                  count = convertScalarToDtype(b, loc, count, elementType);
+                  scale = b.create<arith::DivFOp>(loc, scale, count);
+                } else
+                  scale = b.create<arith::DivSIOp>(loc, scale, count);
+              }
+              b.create<scf::ForOp>(
+                  loc, cstZeroIndex, gradLastDim, cstOneIndex, ValueRange{},
+                  [&](OpBuilder &b, Location loc, Value ivInner,
+                      ValueRange iters) {
+                    SmallVector<Value> indices{ivOuter, ivInner};
+                    Value grad_ = b.create<memref::LoadOp>(loc, grad, indices);
+                    indices[0] = index;
+                    Value gradWeight_ =
+                        b.create<memref::LoadOp>(loc, gradWeight, indices);
+                    Value result;
+                    if (elementType.isa<mlir::FloatType>()) {
+                      result = b.create<arith::MulFOp>(loc, grad_, scale);
+                      result =
+                          b.create<arith::AddFOp>(loc, result, gradWeight_);
+                    } else {
+                      result = b.create<arith::MulIOp>(loc, grad_, scale);
+                      result =
+                          b.create<arith::AddIOp>(loc, result, gradWeight_);
+                    }
+                    b.create<memref::StoreOp>(loc, result, gradWeight, indices);
+                    b.create<scf::YieldOp>(loc);
+                  });
+              b.create<scf::YieldOp>(loc);
+            });
+        b.create<scf::YieldOp>(loc);
+      });
+  return success();
+}
+
 #define DEFINE_OP_GET_EFFECTS(OP_NAME)                                    \
   void OP_NAME::getEffects(                                               \
       SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> \
@@ -1146,6 +1404,7 @@ DEFINE_OP_GET_EFFECTS(SortOp)
 DEFINE_OP_GET_EFFECTS(FftOp)
 DEFINE_OP_GET_EFFECTS(ReverseOp)
 DEFINE_OP_GET_EFFECTS(ScanOp)
+DEFINE_OP_GET_EFFECTS(EmbeddingDenseBackwardOp)
 
 namespace {
 /// This is derived from mlir/lib/Dialect/Linalg/IR/LinalgOps.cpp without any

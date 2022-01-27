@@ -350,6 +350,57 @@ def IREELinalgExt_ReverseOp : IREELinalgExt_Op<"reverse", [
   }];
 }
 
+def IREELinalgExt_EmbeddingDenseBackwardOp : IREELinalgExt_Op<"embeddingdensebackward",
+    [DeclareOpInterfaceMethods<TiledOpInterface,
+      ["generateScalarImplementation"]>]> {
+  let summary = "EmbeddingDenseBackward operator";
+  let description = [{
+    Computes the result of embedding dense backward op.
+  }];
+
+  let arguments = (ins Variadic<AnyRankedTensorOrMemRefType>:$inputs,
+                       Variadic<AnyRankedTensorOrMemRefType>:$outputs,
+                       I64Attr:$num_weights,
+                       I64Attr:$padding_idx,
+                       BoolAttr:$scale_grad_by_freq
+  );
+
+  let builders = [
+    OpBuilder<(ins "ValueRange":$inputs, "ValueRange":$outputs,
+      CArg<"int64_t">:$num_weights, CArg<"int64_t">:$padding_idx,
+      CArg<"bool">:$scale_grad_by_freq)>
+  ];
+
+  let results = (outs Variadic<AnyType>:$results);
+  let assemblyFormat = [{
+    `num_weights` `(` $num_weights `)`
+    `padding_idx` `(` $padding_idx `)`
+    `scale_grad_by_freq` `(` $scale_grad_by_freq `)`
+    attr-dict
+    `ins` `(` $inputs `:` type($inputs) `)`
+    (`outs` `(` $outputs^ `:` type($outputs) `)`)?
+    (`:` type($results)^)?
+  }];
+
+  let extraClassDeclaration = extraLinalgExtOpClassDeclaration # [{
+    Value grad_() {
+      return getInputOperand(0)->get();
+    }
+    Value indices_() {
+      return getInputOperand(1)->get();
+    }
+    Value output() {
+      return getOutputOperand(0)->get();
+    }
+    ShapedType getOperandType() {
+      return grad_().getType().cast<ShapedType>();
+    }
+    int64_t getOperandRank() {
+      return getOperandType().getRank();
+    }
+  }];
+}
+
 //===----------------------------------------------------------------------===//
 // Pure ops
 //===----------------------------------------------------------------------===//

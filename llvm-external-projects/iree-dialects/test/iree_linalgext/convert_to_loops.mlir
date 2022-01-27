@@ -604,3 +604,237 @@ func @scan_2d(%0: memref<16x32xi32>, %1: memref<16x32xi32>) {
 // CHECK:               memref.store %[[V4]], %[[BUFO]][%[[ARG1]], %[[ARG2]]]
 // CHECK:               memref.store %[[V4]], %[[ACC]][%[[ARG2]]]
 // CHECK:             }
+
+// -----
+
+func @embeddingdensebackward_grad_2d_float_scale_false(
+    %grad: memref<?x?xf32>, %indices: memref<?x?xi32>,
+    %grad_weight : memref<?x?xf32>) {
+  iree_linalg_ext.embeddingdensebackward
+    num_weights(20) padding_idx(4) scale_grad_by_freq(false)
+    ins(%grad, %indices: memref<?x?xf32>, memref<?x?xi32>)
+    outs(%grad_weight : memref<?x?xf32>)
+  return
+}
+// CHECK-LABEL: func @embeddingdensebackward_grad_2d_float_scale_false
+// CHECK-SAME:    %[[GRAD:.+]]: memref<?x?xf32>, %[[INDICES:.+]]: memref<?x?xi32>,
+// CHECK-SAME:    %[[GRAD_WEIGHT:.+]]: memref<?x?xf32>
+// CHECK:         %[[C0:.+]] = arith.constant 0 : index
+// CHECK:         %[[C0_I32:.+]] = arith.constant 0 : i32
+// CHECK:         %[[C1:.+]] = arith.constant 1 : index
+// CHECK:         %[[C1_I32:.+]] = arith.constant 1 : i32
+// CHECK:         %[[C20:.+]] = arith.constant 20 : index
+// CHECK:         %[[C4:.+]] = arith.constant 4 : index
+// CHECK:         %[[CST:.+]] = arith.constant 0.000000e+00 : f32
+// CHECK:         %[[CST1:.+]] = arith.constant 1.000000e+00 : f32
+// CHECK:         %[[DIM1_GRAD:.+]] = memref.dim %[[GRAD]], %[[C1]] : memref<?x?xf32>
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[C20]] step %[[C1]] {
+// CHECK:           scf.for %[[J:.+]] = %[[C0]] to %[[DIM1_GRAD]] step %[[C1]] {
+// CHECK:             memref.store %[[CST]], %[[GRAD_WEIGHT]][%[[I]], %[[J]]] : memref<?x?xf32>
+// CHECK:           }
+// CHECK:         }
+// CHECK:         %[[INDICES_1d:.+]] = memref.collapse_shape %[[INDICES]] {{\[}}[0, 1]] : memref<?x?xi32> into memref<?xi32>
+// CHECK:         %[[COUNT_INDICES:.+]] = memref.alloc(%[[C20]]) : memref<?xi32>
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[C20]] step %[[C1]] {
+// CHECK:           memref.store %[[C0_I32]], %[[COUNT_INDICES]][%[[I]]] : memref<?xi32>
+// CHECK:         }
+// CHECK:         %[[NUMEL_INDICES:.+]] = memref.dim %[[INDICES_1d]], %[[C0]] : memref<?xi32>
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[NUMEL_INDICES]] step %[[C1]] {
+// CHECK:           %[[T1:.+]] = memref.load %[[INDICES_1d]][%[[I]]] : memref<?xi32>
+// CHECK:           %[[T2:.+]] = arith.index_cast %[[T1]] : i32 to index
+// CHECK:           %[[T3:.+]] = memref.load %[[COUNT_INDICES]][%[[T2]]] : memref<?xi32>
+// CHECK:           %[[T4:.+]] = arith.addi %[[T3]], %[[C1_I32]] : i32
+// CHECK:           memref.store %[[T4]], %[[COUNT_INDICES]][%[[T2]]] : memref<?xi32>
+// CHECK:         }
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[NUMEL_INDICES]] step %[[C1]] {
+// CHECK:           %[[T1:.+]] = memref.load %[[INDICES_1d]][%[[I]]] : memref<?xi32>
+// CHECK:           %[[T2:.+]] = arith.index_cast %[[T1]] : i32 to index
+// CHECK:           %[[COND:.+]] = arith.cmpi ne, %[[C4]], %[[T2]] : index
+// CHECK:           scf.if %[[COND]] {
+// CHECK:             scf.for %[[J:.+]] = %[[C0]] to %[[DIM1_GRAD]] step %[[C1]] {
+// CHECK:               %[[T3:.+]] = memref.load %[[GRAD]][%[[I]], %[[J]]] : memref<?x?xf32>
+// CHECK:               %[[T4:.+]] = memref.load %[[GRAD_WEIGHT]][%[[T2]], %[[J]]] : memref<?x?xf32>
+// CHECK:               %[[T5:.+]] = arith.mulf %[[T3]], %[[CST1]] : f32
+// CHECK:               %[[OUT:.+]] = arith.addf %[[T5]], %[[T4]] : f32
+// CHECK:               memref.store %[[OUT:.+]], %[[GRAD_WEIGHT]][%[[T2]], %[[J]]] : memref<?x?xf32>
+// CHECK:             }
+// CHECK:           }
+// CHECK:         }
+// CHECK:         return
+// CHECK:       }
+
+// -----
+
+func @embeddingdensebackward_grad_2d_int_scale_false(
+    %grad: memref<?x?xi32>, %indices: memref<?x?xi32>,
+    %grad_weight : memref<?x?xi32>) {
+  iree_linalg_ext.embeddingdensebackward
+    num_weights(20) padding_idx(4) scale_grad_by_freq(false)
+    ins(%grad, %indices: memref<?x?xi32>, memref<?x?xi32>)
+    outs(%grad_weight : memref<?x?xi32>)
+  return
+}
+// CHECK-LABEL: func @embeddingdensebackward_grad_2d_int_scale_false
+// CHECK-SAME:    %[[GRAD:.+]]: memref<?x?xi32>, %[[INDICES:.+]]: memref<?x?xi32>,
+// CHECK-SAME:    %[[GRAD_WEIGHT:.+]]: memref<?x?xi32>
+// CHECK:         %[[C0:.+]] = arith.constant 0 : index
+// CHECK:         %[[C0_I32:.+]] = arith.constant 0 : i32
+// CHECK:         %[[C1:.+]] = arith.constant 1 : index
+// CHECK:         %[[C1_I32:.+]] = arith.constant 1 : i32
+// CHECK:         %[[C20:.+]] = arith.constant 20 : index
+// CHECK:         %[[C4:.+]] = arith.constant 4 : index
+// CHECK:         %[[DIM1_GRAD:.+]] = memref.dim %[[GRAD]], %[[C1]] : memref<?x?xi32>
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[C20]] step %[[C1]] {
+// CHECK:           scf.for %[[J:.+]] = %[[C0]] to %[[DIM1_GRAD]] step %[[C1]] {
+// CHECK:             memref.store %[[C0_I32]], %[[GRAD_WEIGHT]][%[[I]], %[[J]]] : memref<?x?xi32>
+// CHECK:           }
+// CHECK:         }
+// CHECK:         %[[INDICES_1d:.+]] = memref.collapse_shape %[[INDICES]] {{\[}}[0, 1]] : memref<?x?xi32> into memref<?xi32>
+// CHECK:         %[[COUNT_INDICES:.+]] = memref.alloc(%[[C20]]) : memref<?xi32>
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[C20]] step %[[C1]] {
+// CHECK:           memref.store %[[C0_I32]], %[[COUNT_INDICES]][%[[I]]] : memref<?xi32>
+// CHECK:         }
+// CHECK:         %[[NUMEL_INDICES:.+]] = memref.dim %[[INDICES_1d]], %[[C0]] : memref<?xi32>
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[NUMEL_INDICES]] step %[[C1]] {
+// CHECK:           %[[T1:.+]] = memref.load %[[INDICES_1d]][%[[I]]] : memref<?xi32>
+// CHECK:           %[[T2:.+]] = arith.index_cast %[[T1]] : i32 to index
+// CHECK:           %[[T3:.+]] = memref.load %[[COUNT_INDICES]][%[[T2]]] : memref<?xi32>
+// CHECK:           %[[T4:.+]] = arith.addi %[[T3]], %[[C1_I32]] : i32
+// CHECK:           memref.store %[[T4]], %[[COUNT_INDICES]][%[[T2]]] : memref<?xi32>
+// CHECK:         }
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[NUMEL_INDICES]] step %[[C1]] {
+// CHECK:           %[[T1:.+]] = memref.load %[[INDICES_1d]][%[[I]]] : memref<?xi32>
+// CHECK:           %[[T2:.+]] = arith.index_cast %[[T1]] : i32 to index
+// CHECK:           %[[COND:.+]] = arith.cmpi ne, %[[C4]], %[[T2]] : index
+// CHECK:           scf.if %[[COND]] {
+// CHECK:             scf.for %[[J:.+]] = %[[C0]] to %[[DIM1_GRAD]] step %[[C1]] {
+// CHECK:               %[[T3:.+]] = memref.load %[[GRAD]][%[[I]], %[[J]]] : memref<?x?xi32>
+// CHECK:               %[[T4:.+]] = memref.load %[[GRAD_WEIGHT]][%[[T2]], %[[J]]] : memref<?x?xi32>
+// CHECK:               %[[OUT:.+]] = arith.addi %[[T3]], %[[T4]] : i32
+// CHECK:               memref.store %[[OUT:.+]], %[[GRAD_WEIGHT]][%[[T2]], %[[J]]] : memref<?x?xi32>
+// CHECK:             }
+// CHECK:           }
+// CHECK:         }
+// CHECK:         return
+// CHECK:       }
+
+// -----
+
+func @embeddingdensebackward_grad_2d_float_scale_true(
+    %grad: memref<?x?xf32>, %indices: memref<?x?xi32>,
+    %grad_weight : memref<?x?xf32>) {
+  iree_linalg_ext.embeddingdensebackward
+    num_weights(20) padding_idx(4) scale_grad_by_freq(true)
+    ins(%grad, %indices: memref<?x?xf32>, memref<?x?xi32>)
+    outs(%grad_weight : memref<?x?xf32>)
+  return
+}
+// CHECK-LABEL: func @embeddingdensebackward_grad_2d_float_scale_true
+// CHECK-SAME:    %[[GRAD:.+]]: memref<?x?xf32>, %[[INDICES:.+]]: memref<?x?xi32>,
+// CHECK-SAME:    %[[GRAD_WEIGHT:.+]]: memref<?x?xf32>
+// CHECK:         %[[C0:.+]] = arith.constant 0 : index
+// CHECK:         %[[C0_I32:.+]] = arith.constant 0 : i32
+// CHECK:         %[[C1:.+]] = arith.constant 1 : index
+// CHECK:         %[[C1_I32:.+]] = arith.constant 1 : i32
+// CHECK:         %[[C20:.+]] = arith.constant 20 : index
+// CHECK:         %[[C4:.+]] = arith.constant 4 : index
+// CHECK:         %[[CST:.+]] = arith.constant 0.000000e+00 : f32
+// CHECK:         %[[CST1:.+]] = arith.constant 1.000000e+00 : f32
+// CHECK:         %[[DIM1_GRAD:.+]] = memref.dim %[[GRAD]], %[[C1]] : memref<?x?xf32>
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[C20]] step %[[C1]] {
+// CHECK:           scf.for %[[J:.+]] = %[[C0]] to %[[DIM1_GRAD]] step %[[C1]] {
+// CHECK:             memref.store %[[CST]], %[[GRAD_WEIGHT]][%[[I]], %[[J]]] : memref<?x?xf32>
+// CHECK:           }
+// CHECK:         }
+// CHECK:         %[[INDICES_1d:.+]] = memref.collapse_shape %[[INDICES]] {{\[}}[0, 1]] : memref<?x?xi32> into memref<?xi32>
+// CHECK:         %[[COUNT_INDICES:.+]] = memref.alloc(%[[C20]]) : memref<?xi32>
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[C20]] step %[[C1]] {
+// CHECK:           memref.store %[[C0_I32]], %[[COUNT_INDICES]][%[[I]]] : memref<?xi32>
+// CHECK:         }
+// CHECK:         %[[NUMEL_INDICES:.+]] = memref.dim %[[INDICES_1d]], %[[C0]] : memref<?xi32>
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[NUMEL_INDICES]] step %[[C1]] {
+// CHECK:           %[[T1:.+]] = memref.load %[[INDICES_1d]][%[[I]]] : memref<?xi32>
+// CHECK:           %[[T2:.+]] = arith.index_cast %[[T1]] : i32 to index
+// CHECK:           %[[T3:.+]] = memref.load %[[COUNT_INDICES]][%[[T2]]] : memref<?xi32>
+// CHECK:           %[[T4:.+]] = arith.addi %[[T3]], %[[C1_I32]] : i32
+// CHECK:           memref.store %[[T4]], %[[COUNT_INDICES]][%[[T2]]] : memref<?xi32>
+// CHECK:         }
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[NUMEL_INDICES]] step %[[C1]] {
+// CHECK:           %[[T1:.+]] = memref.load %[[INDICES_1d]][%[[I]]] : memref<?xi32>
+// CHECK:           %[[T2:.+]] = arith.index_cast %[[T1]] : i32 to index
+// CHECK:           %[[COND:.+]] = arith.cmpi ne, %[[C4]], %[[T2]] : index
+// CHECK:           scf.if %[[COND]] {
+// CHECK:             %[[T3:.+]] = memref.load %[[COUNT_INDICES]][%[[T2]]] : memref<?xi32>
+// CHECK:             %[[T4:.+]] = arith.sitofp %[[T3]] : i32 to f32
+// CHECK:             %[[T5:.+]] = arith.divf %[[CST1]], %[[T4]] : f32
+// CHECK:             scf.for %[[J:.+]] = %[[C0]] to %[[DIM1_GRAD]] step %[[C1]] {
+// CHECK:               %[[T6:.+]] = memref.load %[[GRAD]][%[[I]], %[[J]]] : memref<?x?xf32>
+// CHECK:               %[[T7:.+]] = memref.load %[[GRAD_WEIGHT]][%[[T2]], %[[J]]] : memref<?x?xf32>
+// CHECK:               %[[T8:.+]] = arith.mulf %[[T6]], %[[T5]] : f32
+// CHECK:               %[[OUT:.+]] = arith.addf %[[T8]], %[[T7]] : f32
+// CHECK:               memref.store %[[OUT:.+]], %[[GRAD_WEIGHT]][%[[T2]], %[[J]]] : memref<?x?xf32>
+// CHECK:             }
+// CHECK:           }
+// CHECK:         }
+// CHECK:         return
+// CHECK:       }
+
+// -----
+
+func @embeddingdensebackward_grad_3d_int_scale_true(
+    %grad: memref<?x?x?xi32>, %indices: memref<?x?xi32>,
+    %grad_weight : memref<?x?xi32>) {
+  iree_linalg_ext.embeddingdensebackward
+    num_weights(20) padding_idx(4) scale_grad_by_freq(true)
+    ins(%grad, %indices: memref<?x?x?xi32>, memref<?x?xi32>)
+    outs(%grad_weight : memref<?x?xi32>)
+  return
+}
+// CHECK-LABEL: func @embeddingdensebackward_grad_3d_int_scale_true
+// CHECK-SAME:    %[[GRAD:.+]]: memref<?x?x?xi32>, %[[INDICES:.+]]: memref<?x?xi32>,
+// CHECK-SAME:    %[[GRAD_WEIGHT:.+]]: memref<?x?xi32>
+// CHECK:         %[[C0:.+]] = arith.constant 0 : index
+// CHECK:         %[[C0_I32:.+]] = arith.constant 0 : i32
+// CHECK:         %[[C1:.+]] = arith.constant 1 : index
+// CHECK:         %[[C1_I32:.+]] = arith.constant 1 : i32
+// CHECK:         %[[C20:.+]] = arith.constant 20 : index
+// CHECK:         %[[C4:.+]] = arith.constant 4 : index
+// CHECK:         %[[C2:.+]] = arith.constant 2 : index
+// CHECK:         %[[DIM1_GRAD:.+]] = memref.dim %[[GRAD]], %[[C2]] : memref<?x?x?xi32>
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[C20]] step %[[C1]] {
+// CHECK:           scf.for %[[J:.+]] = %[[C0]] to %[[DIM1_GRAD]] step %[[C1]] {
+// CHECK:             memref.store %[[C0_I32]], %[[GRAD_WEIGHT]][%[[I]], %[[J]]] : memref<?x?xi32>
+// CHECK:           }
+// CHECK:         }
+// CHECK:         %[[INDICES_1d:.+]] = memref.collapse_shape %[[INDICES]] {{\[}}[0, 1]] : memref<?x?xi32> into memref<?xi32>
+// CHECK:         %[[GRAD_2d:.+]] = memref.collapse_shape %[[GRAD]] {{\[}}[0, 1], [2]] : memref<?x?x?xi32> into memref<?x?xi32>
+// CHECK:         %[[COUNT_INDICES:.+]] = memref.alloc(%[[C20]]) : memref<?xi32>
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[C20]] step %[[C1]] {
+// CHECK:           memref.store %[[C0_I32]], %[[COUNT_INDICES]][%[[I]]] : memref<?xi32>
+// CHECK:         }
+// CHECK:         %[[NUMEL_INDICES:.+]] = memref.dim %[[INDICES_1d]], %[[C0]] : memref<?xi32>
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[NUMEL_INDICES]] step %[[C1]] {
+// CHECK:           %[[T1:.+]] = memref.load %[[INDICES_1d]][%[[I]]] : memref<?xi32>
+// CHECK:           %[[T2:.+]] = arith.index_cast %[[T1]] : i32 to index
+// CHECK:           %[[T3:.+]] = memref.load %[[COUNT_INDICES]][%[[T2]]] : memref<?xi32>
+// CHECK:           %[[T4:.+]] = arith.addi %[[T3]], %[[C1_I32]] : i32
+// CHECK:           memref.store %[[T4]], %[[COUNT_INDICES]][%[[T2]]] : memref<?xi32>
+// CHECK:         }
+// CHECK:         scf.for %[[I:.+]] = %[[C0]] to %[[NUMEL_INDICES]] step %[[C1]] {
+// CHECK:           %[[T1:.+]] = memref.load %[[INDICES_1d]][%[[I]]] : memref<?xi32>
+// CHECK:           %[[T2:.+]] = arith.index_cast %[[T1]] : i32 to index
+// CHECK:           %[[COND:.+]] = arith.cmpi ne, %[[C4]], %[[T2]] : index
+// CHECK:           scf.if %[[COND]] {
+// CHECK:             %[[T3:.+]] = memref.load %[[COUNT_INDICES]][%[[T2]]] : memref<?xi32>
+// CHECK:             %[[T4:.+]] = arith.divsi %[[C1_I32]], %[[T3]] : i32
+// CHECK:             scf.for %[[J:.+]] = %[[C0]] to %[[DIM1_GRAD]] step %[[C1]] {
+// CHECK:               %[[T5:.+]] = memref.load %[[GRAD_2d]][%[[I]], %[[J]]] : memref<?x?xi32>
+// CHECK:               %[[T6:.+]] = memref.load %[[GRAD_WEIGHT]][%[[T2]], %[[J]]] : memref<?x?xi32>
+// CHECK:               %[[T7:.+]] = arith.muli %[[T5]], %[[T4]] : i32
+// CHECK:               %[[OUT:.+]] = arith.addi %[[T7]], %[[T6]] : i32
+// CHECK:               memref.store %[[OUT:.+]], %[[GRAD_WEIGHT]][%[[T2]], %[[J]]] : memref<?x?xi32>
+// CHECK:             }
+// CHECK:           }
+// CHECK:         }
+// CHECK:         return
+// CHECK:       }
